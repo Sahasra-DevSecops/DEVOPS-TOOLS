@@ -54,3 +54,4 @@
       value: "{{ item.instances[0].public_ip_address }}"
       wait: true
     loop: "{{ ec2_output.results }}"
+    when: item.item == 'frontend' # only frontend will be exposed to public, so only frontend's public IP will be used for roboshop-dev.daws88s.online
