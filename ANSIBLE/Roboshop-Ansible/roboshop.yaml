@@ -5,6 +5,8 @@
     sg_id: sg-000c5bbdae937d72f
     ami_id: ami-0220d79f3f480ecf5
     env: dev
+    roboshop: my-project
+
     instances:
     - mongodb
     - catalogue
@@ -18,7 +20,7 @@
       tags:
         Project: "{{ roboshop }}"
         Component: "{{ item }}"
-        env: "{{ env }}"
+        Environment: "{{ env }}"
         Name: "{{ item }}-{{ env }}"
     loop: "{{ instances }}"
     register: ec2_output
