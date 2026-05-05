@@ -7,10 +7,10 @@
     amazon.aws.ec2_instance:
       name: mongodb-dev
       instance_type: t3.micro
-      image_id: ami-0220d79f3f480ecf5 # ← replace with your AMI ID
+      image_id: ami-0220d79f3f480ecf5
       region: us-east-1
-      key_name: daws88s.online # ← replace with your key name
-      security_group: sg-000c5bbdae937d72f # ← replace with your SG ID
+      key_name: daws88s.online
+      security_group: sg-000c5bbdae937d72f
       wait: true
       state: running
     register: mongodb_ec2
@@ -32,25 +32,37 @@
       name: "{{ mongodb_ec2.instances[0].public_ip_address }}"
       groups: mongodb
       ansible_user: ec2-user
-      ansible_ssh_private_key_file: ~/.ssh/your-key.pem
+      ansible_ssh_private_key_file: ~/.ssh/daws88s.online.pem
 
   - name: add catalogue to inventory
     ansible.builtin.add_host:
       name: "{{ catalogue_ec2.instances[0].public_ip_address }}"
       groups: catalogue
       ansible_user: ec2-user
-      ansible_ssh_private_key_file: ~/.ssh/your-key.pem
+      ansible_ssh_private_key_file: ~/.ssh/daws88s.online.pem
+      # pass mongodb IP directly to catalogue host vars
+      mongodb_host: "{{ mongodb_ec2.instances[0].private_ip_address }}"
 
-  - name: wait for SSH to be ready
+  - name: wait for SSH on mongodb to be ready
+    ansible.builtin.wait_for:
+      host: "{{ mongodb_ec2.instances[0].public_ip_address }}"
+      port: 22
+      delay: 10
+      timeout: 120
+
+  - name: wait for SSH on catalogue to be ready
     ansible.builtin.wait_for:
       host: "{{ catalogue_ec2.instances[0].public_ip_address }}"
       port: 22
       delay: 10
       timeout: 120
 
+# ─── MONGODB ────────────────────────────────────────────────────────────────
+
 - name: mongodb configure
   hosts: mongodb
   become: yes
+
   tasks:
   - name: copy mongo repo file
     ansible.builtin.copy:
@@ -58,31 +70,45 @@
       dest: /etc/yum.repos.d/mongodb.repo
 
   - name: install mongodb server
-    ansible.builtin.yum:
+    ansible.builtin.dnf:
+      # fixed: use dnf not yum
       name: mongodb-org
       state: present
 
   - name: allow remote connections to mongodb
     ansible.builtin.replace:
       path: /etc/mongod.conf
-      regexp: '127.0.0.1'
+      regexp: '127\.0\.0\.1' # fixed: escape the dots
       replace: '0.0.0.0'
+    notify: restart mongod # fixed: trigger handler on change
 
   - name: start and enable mongodb service
     ansible.builtin.service:
       name: mongod
       state: started
       enabled: yes
-    # paste your mongodb tasks here
+
+  handlers:
+  - name: restart mongod
+    ansible.builtin.service:
+      name: mongod
+      state: restarted
+
+# ─── CATALOGUE ──────────────────────────────────────────────────────────────
 
 - name: configure catalogue
   hosts: catalogue
   become: yes
+
   vars:
-    MONGODB_HOST: "{{ hostvars[groups['mongodb'][0]].inventory_hostname }}"
+    # fixed: use private IP passed from provisioning play (more reliable than DNS)
+    MONGODB_HOST: "{{ hostvars[inventory_hostname].mongodb_host }}"
+
   tasks:
   - name: enable nodejs 20
     ansible.builtin.command: dnf module enable nodejs:20 -y
+    args:
+      creates: /etc/dnf/modules.d/nodejs.module # skip if already enabled
 
   - name: install nodejs
     ansible.builtin.dnf:
@@ -95,6 +121,7 @@
       system: true
       home: /app
       shell: /sbin/nologin
+      create_home: false # fixed: don't create home yet, we control the dir below
       comment: "Roboshop system user"
 
   - name: delete app directory
@@ -106,6 +133,9 @@
     ansible.builtin.file:
       path: /app
       state: directory
+      owner: roboshop # fixed: set correct owner
+      group: roboshop
+      mode: '0755'
 
   - name: delete catalogue zip file
     ansible.builtin.file:
@@ -117,7 +147,7 @@
       url: https://roboshop-artifacts.s3.amazonaws.com/catalogue-v3.zip
       dest: /tmp/catalogue.zip
 
-  - name: unarchieve catalogue
+  - name: unarchive catalogue
     ansible.builtin.unarchive:
       src: /tmp/catalogue.zip
       dest: /app
@@ -131,6 +161,7 @@
     ansible.builtin.copy:
       src: catalogue.service
       dest: /etc/systemd/system/catalogue.service
+    notify: restart catalogue # fixed: use handler
 
   - name: copy mongo repo
     ansible.builtin.copy:
@@ -143,7 +174,7 @@
       state: present
 
   - name: check products loaded
-    ansible.builtin.command: mongosh --host "{{ MONGODB_HOST }}" --quiet  --eval 'db.getMongo().getDBNames().indexOf("catalogue")'
+    ansible.builtin.command: mongosh --host "{{ MONGODB_HOST }}" --quiet --eval 'db.getMongo().getDBNames().indexOf("catalogue")'
     register: catalogue_output
 
   - name: print the output
@@ -152,11 +183,16 @@
 
   - name: load the products
     ansible.builtin.shell: mongosh --host "{{ MONGODB_HOST }}" </app/db/master-data.js
-    when: catalogue_output.stdout  | int < 0
+    when: catalogue_output.stdout_lines | last | int < 0 # fixed: use last line only
 
   - name: start catalogue
     ansible.builtin.service:
       name: catalogue
-      state: restarted
+      state: started
       enabled: yes
-  # paste your catalogue tasks here
+
+  handlers:
+  - name: restart catalogue
+    ansible.builtin.service:
+      name: catalogue
+      state: restarted
